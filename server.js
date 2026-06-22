@@ -102,6 +102,70 @@ function broadcast(data) {
   io.emit('image', data);
 }
 
+// ── Initial scan ──────────────────────────────────────────────────────────────
+/**
+ * For a single level-1 folder, find its latest image by always recursing into
+ * the newest subdirectory (by mtime) at each level. This reads O(depth × width)
+ * entries instead of every file, so it stays fast even with thousands of images.
+ */
+function findLatestImage(dir) {
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return null; }
+
+  let bestImage = null;
+  const subdirs = [];
+
+  for (const entry of entries) {
+    if (entry.name.startsWith('.')) continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      let stat;
+      try { stat = fs.statSync(full); } catch { continue; }
+      subdirs.push({ full, mtime: stat.mtimeMs });
+    } else if (isImageFile(full)) {
+      let stat;
+      try { stat = fs.statSync(full); } catch { continue; }
+      if (!bestImage || stat.mtimeMs > bestImage.mtime) {
+        bestImage = { full, mtime: stat.mtimeMs };
+      }
+    }
+  }
+
+  // Recurse into the 2 newest subdirectories only
+  subdirs.sort((a, b) => b.mtime - a.mtime);
+  for (const { full } of subdirs.slice(0, 2)) {
+    const candidate = findLatestImage(full);
+    if (candidate && (!bestImage || candidate.mtime > bestImage.mtime)) {
+      bestImage = candidate;
+    }
+  }
+
+  return bestImage;
+}
+
+/**
+ * Reads only the level-1 subdirectory names from SCREENSHOTS_DIR, then calls
+ * findLatestImage for each — no deep recursive scan over all historic files.
+ */
+function initialScan(dir) {
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+
+  for (const entry of entries) {
+    if (entry.name.startsWith('.') || !entry.isDirectory()) continue;
+    const folderNumber = entry.name;
+    const latest = findLatestImage(path.join(dir, folderNumber));
+    if (latest) {
+      latestImages.set(folderNumber, { url: toImageUrl(latest.full), mtime: latest.mtime });
+    }
+  }
+}
+
+if (fs.existsSync(SCREENSHOTS_DIR)) {
+  initialScan(SCREENSHOTS_DIR);
+}
+console.log(`Startup   ${latestImages.size} folder(s) discovered`);
+
 // ── File watcher ──────────────────────────────────────────────────────────────
 const watcher = chokidar.watch(SCREENSHOTS_DIR, {
   ignored: /(^|[/\\])\../,      // skip hidden files/dirs
