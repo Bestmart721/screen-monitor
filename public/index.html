@@ -528,6 +528,10 @@
   socket.on('disconnect',    () => setStatus('disconnected', 'Disconnected — reconnecting…'));
   socket.on('connect_error', () => setStatus('disconnected', 'Connection error'));
 
+  socket.on('folder', ({ folderNumber }) => {
+    if (!knownFolders[folderNumber]) createCard(folderNumber);
+  });
+
   socket.on('init',  ({ folderNumber, imagePath, mtime }) => {
     updateImage(folderNumber, imagePath, mtime, false);
   });

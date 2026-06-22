@@ -37,8 +37,10 @@ function isAllowedIp(ip) {
 }
 
 // ── State ─────────────────────────────────────────────────────────────────────
-// folderNumber (string) → { url: string, mtime: number }
-const latestImages = new Map();
+// All known level-1 folder names (populated by initial scan + watcher)
+const knownFolders   = new Set();
+// folderNumber (string) → { url: string, mtime: number }  (only when image exists)
+const latestImages   = new Map();
 // folderNumber (string) → debounce timer handle
 const debounceTimers = new Map();
 
@@ -68,8 +70,13 @@ io.on('connection', (socket) => {
   socket.emit('config', { flashSeconds: FLASH_SECONDS, alertOnly: ALLOWED_IPS.length > 0 });
 
   // Push current state immediately to the newly connected client
-  for (const [folderNumber, { url, mtime }] of latestImages) {
-    socket.emit('init', { folderNumber, imagePath: url, mtime });
+  for (const folderNumber of knownFolders) {
+    const img = latestImages.get(folderNumber);
+    if (img) {
+      socket.emit('init', { folderNumber, imagePath: img.url, mtime: img.mtime });
+    } else {
+      socket.emit('folder', { folderNumber });
+    }
   }
 
   socket.on('disconnect', () => {
@@ -104,67 +111,16 @@ function broadcast(data) {
 
 // ── Initial scan ──────────────────────────────────────────────────────────────
 /**
- * Fixed-depth scan matching the known structure:
- *   SCREENSHOTS_DIR / folderNumber / session-guid / YYYY-MM-DD / image.jpg
- *
- * Per folder-number this does exactly 3 readdirSync calls:
- *   1. list guid dirs  → stat each to pick the newest one
- *   2. list date dirs  → sort by name desc (ISO dates are lexicographic)
- *   3. list files in newest date dir → stat images to pick newest
- * No recursion, no scanning of old files.
+ * Reads only the direct children of SCREENSHOTS_DIR to discover folder numbers.
+ * One readdirSync call, zero stat calls — no image loading at startup.
+ * Images are populated live by the watcher as new files arrive.
  */
 function initialScan(dir) {
-  let level1;
-  try { level1 = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-
-  for (const l1 of level1) {
-    if (l1.name.startsWith('.') || !l1.isDirectory()) continue;
-    const folderNumber = l1.name;
-    const l1dir = path.join(dir, folderNumber);
-
-    // Level 2: session-guid dirs — stat each, keep only the newest
-    let level2;
-    try { level2 = fs.readdirSync(l1dir, { withFileTypes: true }); } catch { continue; }
-    let newestGuid = null;
-    for (const l2 of level2) {
-      if (l2.name.startsWith('.') || !l2.isDirectory()) continue;
-      const full = path.join(l1dir, l2.name);
-      let stat;
-      try { stat = fs.statSync(full); } catch { continue; }
-      if (!newestGuid || stat.mtimeMs > newestGuid.mtime) {
-        newestGuid = { full, mtime: stat.mtimeMs };
-      }
-    }
-    if (!newestGuid) continue;
-
-    // Level 3: date dirs — sort by name desc (YYYY-MM-DD sorts lexicographically)
-    let level3;
-    try { level3 = fs.readdirSync(newestGuid.full, { withFileTypes: true }); } catch { continue; }
-    const newestDate = level3
-      .filter(e => !e.name.startsWith('.') && e.isDirectory())
-      .map(e => e.name)
-      .sort()
-      .at(-1);
-    if (!newestDate) continue;
-    const dateDir = path.join(newestGuid.full, newestDate);
-
-    // Level 4: pick newest image in that date dir
-    let files;
-    try { files = fs.readdirSync(dateDir, { withFileTypes: true }); } catch { continue; }
-    let bestImage = null;
-    for (const f of files) {
-      if (f.isDirectory() || f.name.startsWith('.')) continue;
-      const full = path.join(dateDir, f.name);
-      if (!isImageFile(full)) continue;
-      let stat;
-      try { stat = fs.statSync(full); } catch { continue; }
-      if (!bestImage || stat.mtimeMs > bestImage.mtime) {
-        bestImage = { full, mtime: stat.mtimeMs };
-      }
-    }
-
-    if (bestImage) {
-      latestImages.set(folderNumber, { url: toImageUrl(bestImage.full), mtime: bestImage.mtime });
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const entry of entries) {
+    if (!entry.name.startsWith('.') && entry.isDirectory()) {
+      knownFolders.add(entry.name);
     }
   }
 }
@@ -193,6 +149,7 @@ watcher.on('add', (filePath, stats) => {
 
   // Only promote this file if it is at least as new as the current latest
   if (!current || mtime >= current.mtime) {
+    knownFolders.add(folderNumber);
     latestImages.set(folderNumber, { url: toImageUrl(filePath), mtime });
 
     // Debounce broadcast per folder — coalesces bursts into one emit
