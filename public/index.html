@@ -34,6 +34,9 @@
       border-radius: 8px;
       overflow: hidden;
       transition: border-color .15s, box-shadow .15s;
+      display: flex;
+      flex-direction: column;
+      height: 100%;
     }
 
     .monitor-card.flash {
@@ -84,6 +87,7 @@
     /* Fixed 16:9 image area */
     .img-wrap {
       width: 100%;
+      flex: 1;
       background: #000;
       display: flex;
       align-items: center;
@@ -341,12 +345,6 @@
   });
 
   socket.on('image', ({ folderNumber, imagePath, mtime }) => {
-    if (alertOnly) {
-      const name = getFolderName(folderNumber);
-      const filename = decodeURIComponent(imagePath.split('/').pop());
-      alert(`[${name}] New screenshot: ${filename}`);
-      return;
-    }
     updateImage(folderNumber, imagePath, mtime, true);
   });
 </script>
