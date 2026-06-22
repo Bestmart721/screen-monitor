@@ -99,13 +99,45 @@ function broadcast(data) {
   io.emit('image', data);
 }
 
-// ── File watcher ──────────────────────────────────────────────────────────────
-let watcherReady = false;
+// ── Initial scan ──────────────────────────────────────────────────────────────
+/**
+ * Fast recursive scan that finds the latest image per top-level folder
+ * without emitting per-file events. Much faster than chokidar's ignoreInitial:false
+ * when there are many existing files.
+ */
+function initialScan(dir) {
+  let entries;
+  try { entries = fs.readdirSync(dir); } catch { return; }
 
+  for (const entry of entries) {
+    if (entry.startsWith('.')) continue;
+    const full = path.join(dir, entry);
+    let stat;
+    try { stat = fs.statSync(full); } catch { continue; }
+
+    if (stat.isDirectory()) {
+      initialScan(full);
+    } else if (isImageFile(full)) {
+      const folderNumber = getFolderNumber(full);
+      const mtime = stat.mtimeMs;
+      const current = latestImages.get(folderNumber);
+      if (!current || mtime >= current.mtime) {
+        latestImages.set(folderNumber, { url: toImageUrl(full), mtime });
+      }
+    }
+  }
+}
+
+if (fs.existsSync(SCREENSHOTS_DIR)) {
+  initialScan(SCREENSHOTS_DIR);
+}
+console.log(`Startup   ${latestImages.size} folder(s) discovered`);
+
+// ── File watcher ──────────────────────────────────────────────────────────────
 const watcher = chokidar.watch(SCREENSHOTS_DIR, {
   ignored: /(^|[/\\])\../,      // skip hidden files/dirs
   persistent: true,
-  ignoreInitial: false,          // process existing files on startup
+  ignoreInitial: true,           // initial state already populated by initialScan
   ignorePermissionErrors: true,
 });
 
@@ -120,18 +152,13 @@ watcher.on('add', (filePath, stats) => {
   if (!current || mtime >= current.mtime) {
     const url = toImageUrl(filePath);
     latestImages.set(folderNumber, { url, mtime });
-
-    if (watcherReady) {
-      console.log(`[+] folder=${folderNumber}  ${path.basename(filePath)}`);
-      broadcast({ folderNumber, imagePath: url, mtime });
-    }
+    console.log(`[+] folder=${folderNumber}  ${path.basename(filePath)}`);
+    broadcast({ folderNumber, imagePath: url, mtime });
   }
 });
 
 watcher.on('ready', () => {
-  watcherReady = true;
   console.log(`Watching  "${SCREENSHOTS_DIR}"`);
-  console.log(`Startup   ${latestImages.size} folder(s) discovered`);
 });
 
 watcher.on('error', err => console.error('Watcher error:', err.message));

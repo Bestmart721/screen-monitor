@@ -11,6 +11,7 @@
     crossorigin="anonymous">
   <script src="/socket.io/socket.io.js"></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/glightbox/dist/css/glightbox.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
   <style>
     /* Speed up GLightbox animations */
     .glightbox-container .gslide,
@@ -84,15 +85,17 @@
       font-variant-numeric: tabular-nums;
     }
 
-    /* Fixed 16:9 image area */
+    /* Image area: 4:3 minimum, widens to match image natural ratio */
     .img-wrap {
       width: 100%;
-      flex: 1;
+      aspect-ratio: 4 / 3;
       background: #000;
       display: flex;
       align-items: center;
       justify-content: center;
       cursor: default;
+      overflow: hidden;
+      margin-block: auto;
     }
 
     .img-wrap.has-image {
@@ -101,7 +104,7 @@
 
     .img-wrap img {
       width: 100%;
-      height: auto;
+      height: 100%;
       object-fit: contain;
       display: none;
     }
@@ -124,6 +127,35 @@
     #conn-badge.connected    .dot { background: #22c55e; }
     #conn-badge.disconnected .dot { background: #ef4444; }
     #conn-badge.connecting   .dot { background: #f59e0b; }
+
+    .drag-handle {
+      cursor: grab;
+      color: #475569;
+      padding: 0 6px 0 0;
+      font-size: 1rem;
+      line-height: 1;
+      flex-shrink: 0;
+    }
+    .drag-handle:active { cursor: grabbing; }
+    .drag-handle:hover  { color: #94a3b8; }
+
+    .col-dragging { opacity: 0.35; }
+    .col-drag-over > .monitor-card {
+      outline: 2px dashed #3b82f6;
+      outline-offset: 2px;
+    }
+
+    .hide-btn {
+      background: none;
+      border: none;
+      color: #475569;
+      padding: 0 0 0 8px;
+      font-size: .95rem;
+      cursor: pointer;
+      line-height: 1;
+      flex-shrink: 0;
+    }
+    .hide-btn:hover { color: #ef4444; }
   </style>
 </head>
 <body>
@@ -131,10 +163,21 @@
 
   <div class="d-flex align-items-center justify-content-between mb-3">
     <h5 class="text-light mb-0">Screen Monitor</h5>
-    <div id="conn-badge" class="connecting d-flex align-items-center text-secondary small">
-      <span class="dot"></span>
-      <span id="conn-label">Connecting…</span>
+    <div class="d-flex align-items-center gap-2">
+      <button id="manage-hidden-btn" class="btn btn-sm btn-outline-secondary d-none" onclick="toggleHiddenPanel()">
+        <i class="bi bi-eye-slash-fill"></i> <span id="hidden-count">0</span> hidden
+      </button>
+      <div id="conn-badge" class="connecting d-flex align-items-center text-secondary small">
+        <span class="dot"></span>
+        <span id="conn-label">Connecting…</span>
+      </div>
     </div>
+  </div>
+
+  <!-- Hidden screens panel -->
+  <div id="hidden-panel" class="d-none mb-3 p-2 rounded" style="background:#1e293b;border:1px solid #1e3a5f">
+    <div class="text-secondary small mb-2">Hidden screens — click to restore</div>
+    <div id="hidden-list" class="d-flex flex-wrap gap-2"></div>
   </div>
 
   <!-- Cards are injected here, 3 per row on md+ screens -->
@@ -201,6 +244,140 @@
       delete folderNames[folderNumber];
     }
     localStorage.setItem(LS_KEY, JSON.stringify(folderNames));
+    updateHiddenPanel(); // refresh names shown in hidden panel
+  }
+
+  // ── Hidden folders ──────────────────────────────────────────────────────────
+  const LS_HIDDEN_KEY = 'hiddenFolders';
+  const LS_ORDER_KEY  = 'folderOrder';
+
+  function loadHiddenFolders() {
+    try { return JSON.parse(localStorage.getItem(LS_HIDDEN_KEY)) || {}; } catch { return {}; }
+  }
+
+  let hiddenFolders = loadHiddenFolders();
+
+  function isHidden(folderNumber) { return !!hiddenFolders[folderNumber]; }
+
+  function saveHiddenFolders() {
+    localStorage.setItem(LS_HIDDEN_KEY, JSON.stringify(hiddenFolders));
+  }
+
+  function hideCard(folderNumber) {
+    hiddenFolders[folderNumber] = true;
+    saveHiddenFolders();
+    const col = grid.querySelector(`[data-folder="${folderNumber}"]`);
+    if (col) col.style.display = 'none';
+    updateHiddenPanel();
+  }
+
+  function showCard(folderNumber) {
+    delete hiddenFolders[folderNumber];
+    saveHiddenFolders();
+    const col = grid.querySelector(`[data-folder="${folderNumber}"]`);
+    if (col) col.style.display = '';
+    updateHiddenPanel();
+  }
+
+  function updateHiddenPanel() {
+    const hiddenKeys = Object.keys(hiddenFolders);
+    const manageBtn  = document.getElementById('manage-hidden-btn');
+    const countEl    = document.getElementById('hidden-count');
+    const hiddenList = document.getElementById('hidden-list');
+    if (!manageBtn) return;
+    countEl.textContent = hiddenKeys.length;
+    if (hiddenKeys.length > 0) {
+      manageBtn.classList.remove('d-none');
+    } else {
+      manageBtn.classList.add('d-none');
+      document.getElementById('hidden-panel').classList.add('d-none');
+    }
+    hiddenList.innerHTML = '';
+    for (const fn of hiddenKeys) {
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-sm btn-outline-primary';
+      btn.innerHTML = `<i class="bi bi-eye"></i> ${getFolderName(fn)}`;
+      btn.onclick = () => showCard(fn);
+      hiddenList.appendChild(btn);
+    }
+  }
+
+  function toggleHiddenPanel() {
+    document.getElementById('hidden-panel').classList.toggle('d-none');
+  }
+
+  // ── Folder order ────────────────────────────────────────────────────────────
+  function loadFolderOrder() {
+    try { return JSON.parse(localStorage.getItem(LS_ORDER_KEY)) || []; } catch { return []; }
+  }
+
+  let folderOrder = loadFolderOrder();
+
+  function saveFolderOrder() {
+    folderOrder = [...grid.querySelectorAll('[data-folder]')].map(el => el.dataset.folder);
+    localStorage.setItem(LS_ORDER_KEY, JSON.stringify(folderOrder));
+  }
+
+  function applyOrder() {
+    const cols = [...grid.querySelectorAll('[data-folder]')];
+    cols.sort((a, b) => {
+      const ai = folderOrder.indexOf(a.dataset.folder);
+      const bi = folderOrder.indexOf(b.dataset.folder);
+      // Both in saved order → use saved positions
+      if (ai !== -1 && bi !== -1) return ai - bi;
+      // Only one known → known goes first
+      if (ai !== -1) return -1;
+      if (bi !== -1) return 1;
+      // Neither known → numeric order
+      const an = parseInt(a.dataset.folder, 10), bn = parseInt(b.dataset.folder, 10);
+      return isNaN(an) || isNaN(bn) ? a.dataset.folder.localeCompare(b.dataset.folder) : an - bn;
+    });
+    cols.forEach(col => grid.appendChild(col));
+  }
+
+  // ── Drag and drop ───────────────────────────────────────────────────────────
+  let dragSrc = null;
+
+  function addDragHandlers(col) {
+    const handle = col.querySelector('.drag-handle');
+    if (handle) {
+      // Only allow drag when initiated from the handle
+      handle.addEventListener('mousedown', () => { col.draggable = true; });
+    }
+
+    col.addEventListener('dragstart', (e) => {
+      dragSrc = col;
+      setTimeout(() => col.classList.add('col-dragging'), 0);
+      e.dataTransfer.effectAllowed = 'move';
+    });
+
+    col.addEventListener('dragend', () => {
+      col.classList.remove('col-dragging');
+      grid.querySelectorAll('.col-drag-over').forEach(el => el.classList.remove('col-drag-over'));
+      col.draggable = false;
+      dragSrc = null;
+      saveFolderOrder();
+    });
+
+    col.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      if (dragSrc && col !== dragSrc) col.classList.add('col-drag-over');
+    });
+
+    col.addEventListener('dragleave', (e) => {
+      if (!col.contains(e.relatedTarget)) col.classList.remove('col-drag-over');
+    });
+
+    col.addEventListener('drop', (e) => {
+      e.preventDefault();
+      col.classList.remove('col-drag-over');
+      if (!dragSrc || dragSrc === col) return;
+      const allCols = [...grid.children];
+      const srcIdx  = allCols.indexOf(dragSrc);
+      const dstIdx  = allCols.indexOf(col);
+      grid.insertBefore(dragSrc, srcIdx < dstIdx ? col.nextSibling : col);
+    });
   }
 
   // ── Connection status ───────────────────────────────────────────────────────
@@ -218,8 +395,14 @@
     col.innerHTML = `
       <div class="monitor-card" id="card-${folderNumber}">
         <div class="card-header d-flex justify-content-between align-items-center">
-          <span class="folder-label" id="lbl-${folderNumber}" title="Click to rename">${getFolderName(folderNumber)}</span>
-          <span class="ts-label" id="ts-${folderNumber}">—</span>
+          <div class="d-flex align-items-center flex-grow-1 overflow-hidden">
+            <span class="drag-handle" title="Drag to reorder"><i class="bi bi-grip-vertical"></i></span>
+            <span class="folder-label" id="lbl-${folderNumber}" title="Click to rename">${getFolderName(folderNumber)}</span>
+          </div>
+          <div class="d-flex align-items-center">
+            <span class="ts-label" id="ts-${folderNumber}">—</span>
+            <button class="hide-btn" title="Hide card"><i class="bi bi-eye-slash"></i></button>
+          </div>
         </div>
         <div class="img-wrap" id="wrap-${folderNumber}">
           <img id="img-${folderNumber}" alt="screenshot">
@@ -227,20 +410,23 @@
         </div>
       </div>`;
 
-    // Insert column in ascending numeric order
-    const existing = [...grid.querySelectorAll('[data-folder]')];
-    const before = existing.find(el => {
-      const a = parseInt(el.dataset.folder, 10);
-      const b = parseInt(folderNumber, 10);
-      return isNaN(a) || isNaN(b) ? el.dataset.folder > folderNumber : a > b;
-    });
-
-    before ? grid.insertBefore(col, before) : grid.appendChild(col);
+    grid.appendChild(col);
     knownFolders[folderNumber] = true;
+
+    if (isHidden(folderNumber)) {
+      col.style.display = 'none';
+      updateHiddenPanel();
+    }
+
+    applyOrder();
+    addDragHandlers(col);
 
     // Inline rename on click
     const lbl = col.querySelector(`#lbl-${folderNumber}`);
     lbl.addEventListener('click', () => startRename(folderNumber));
+
+    // Hide button
+    col.querySelector('.hide-btn').addEventListener('click', () => hideCard(folderNumber));
 
     // Image preview on click
     const wrap = col.querySelector(`#wrap-${folderNumber}`);
@@ -310,6 +496,8 @@
     // Cache-bust so the browser always fetches the freshest file
     const wrap = document.getElementById(`wrap-${folderNumber}`);
     img.onload = () => {
+      const ratio = img.naturalWidth / img.naturalHeight;
+      wrap.style.aspectRatio = ratio > (4 / 3) ? `${img.naturalWidth} / ${img.naturalHeight}` : '4 / 3';
       img.style.display = 'block';
       ph.style.display  = 'none';
       wrap.classList.add('has-image');
