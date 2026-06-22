@@ -9,7 +9,16 @@
     rel="stylesheet"
     integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
     crossorigin="anonymous">
+  <script src="/socket.io/socket.io.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/glightbox/dist/css/glightbox.min.css">
   <style>
+    /* Speed up GLightbox animations */
+    .glightbox-container .gslide,
+    .glightbox-container .goverlay,
+    .glightbox-container .gcontainer {
+      animation-duration: 0.15s !important;
+      transition-duration: 0.15s !important;
+    }
     :root {
       --card-bg:     #0f172a;
       --card-border: #1e3a5f;
@@ -42,46 +51,62 @@
       font-size: .95rem;
       font-weight: 600;
       color: #e2e8f0;
+      cursor: pointer;
+      border-radius: 4px;
+      padding: 1px 4px;
+      transition: background .15s;
+    }
+
+    .folder-label:hover {
+      background: rgba(255,255,255,.08);
+    }
+
+    .folder-label-input {
+      font-size: .95rem;
+      font-weight: 600;
+      color: #e2e8f0;
+      background: #0f172a;
+      border: 1px solid #3b82f6;
+      border-radius: 4px;
+      padding: 1px 4px;
+      outline: none;
+      width: 100%;
+      max-width: 220px;
     }
 
     .ts-label {
-      font-size: .68rem;
-      color: #64748b;
+      font-size: .8rem;
+      font-weight: 600;
+      color: #94a3b8;
       font-variant-numeric: tabular-nums;
     }
 
     /* Fixed 16:9 image area */
     .img-wrap {
       width: 100%;
-      aspect-ratio: 16 / 9;
       background: #000;
       display: flex;
       align-items: center;
       justify-content: center;
-      overflow: hidden;
+      cursor: default;
+    }
+
+    .img-wrap.has-image {
+      cursor: pointer;
     }
 
     .img-wrap img {
       width: 100%;
-      height: 100%;
+      height: auto;
       object-fit: contain;
       display: none;
     }
 
     .img-wrap .placeholder {
+      padding: 2rem 0;
       color: #334155;
       font-size: .8rem;
       user-select: none;
-    }
-
-    .filename-label {
-      font-size: .65rem;
-      color: #475569;
-      padding: .25rem .5rem;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      background: var(--card-bg);
     }
 
     /* Connection badge */
@@ -123,6 +148,57 @@
   // folderNumber → true (tracks which cards exist)
   const knownFolders = {};
 
+  // folderNumber → Date of last image update
+  const lastUpdateTime = {};
+
+  // Configured by server via 'config' event
+  let flashSeconds = 5;
+  let alertOnly    = false;
+
+  // ── Relative time helper ────────────────────────────────────────────────────
+  function timeAgo(date) {
+    const secs = Math.floor((Date.now() - date) / 1000);
+    if (secs < flashSeconds)  return 'just now';
+    if (secs < 60) return `${secs}s ago`;
+    const mins = Math.floor(secs / 60);
+    if (mins < 60) return `${mins} min ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24)  return `${hrs}h ago`;
+    return `${Math.floor(hrs / 24)}d ago`;
+  }
+
+  function refreshAllTimestamps() {
+    for (const [folderNumber, date] of Object.entries(lastUpdateTime)) {
+      const ts = document.getElementById(`ts-${folderNumber}`);
+      if (ts) ts.textContent = timeAgo(date);
+    }
+  }
+
+  setInterval(refreshAllTimestamps, 1_000);
+
+  // ── Folder name map (persisted in localStorage) ─────────────────────────────
+  const LS_KEY = 'folderNames';
+
+  function loadFolderNames() {
+    try { return JSON.parse(localStorage.getItem(LS_KEY)) || {}; } catch { return {}; }
+  }
+
+  let folderNames = loadFolderNames();
+
+  function getFolderName(folderNumber) {
+    return folderNames[folderNumber] || `Folder ${folderNumber}`;
+  }
+
+  function saveFolderName(folderNumber, name) {
+    name = name.trim();
+    if (name) {
+      folderNames[folderNumber] = name;
+    } else {
+      delete folderNames[folderNumber];
+    }
+    localStorage.setItem(LS_KEY, JSON.stringify(folderNames));
+  }
+
   // ── Connection status ───────────────────────────────────────────────────────
   function setStatus(state, text) {
     badge.className = `${state} d-flex align-items-center small`;
@@ -138,14 +214,13 @@
     col.innerHTML = `
       <div class="monitor-card" id="card-${folderNumber}">
         <div class="card-header d-flex justify-content-between align-items-center">
-          <span class="folder-label">Folder ${folderNumber}</span>
+          <span class="folder-label" id="lbl-${folderNumber}" title="Click to rename">${getFolderName(folderNumber)}</span>
           <span class="ts-label" id="ts-${folderNumber}">—</span>
         </div>
         <div class="img-wrap" id="wrap-${folderNumber}">
           <img id="img-${folderNumber}" alt="screenshot">
           <span class="placeholder" id="ph-${folderNumber}">No image yet</span>
         </div>
-        <div class="filename-label" id="fn-${folderNumber}">&nbsp;</div>
       </div>`;
 
     // Insert column in ascending numeric order
@@ -158,57 +233,123 @@
 
     before ? grid.insertBefore(col, before) : grid.appendChild(col);
     knownFolders[folderNumber] = true;
+
+    // Inline rename on click
+    const lbl = col.querySelector(`#lbl-${folderNumber}`);
+    lbl.addEventListener('click', () => startRename(folderNumber));
+
+    // Image preview on click
+    const wrap = col.querySelector(`#wrap-${folderNumber}`);
+    wrap.addEventListener('click', () => {
+      const imgEl = document.getElementById(`img-${folderNumber}`);
+      if (!imgEl || imgEl.style.display === 'none' || !imgEl.src) return;
+      const filename = decodeURIComponent(imgEl.src.split('/').pop().split('?')[0]);
+      const lb = GLightbox({
+        elements: [{
+          href: imgEl.src,
+          type: 'image',
+          title: `<span style="font-size:1.15rem;font-weight:700">${getFolderName(folderNumber)}</span>`,
+          description: `<span style="font-size:.8rem;opacity:.7">${filename}</span>`,
+        }],
+        touchNavigation: true,
+        keyboardNavigation: true,
+        closeButton: true,
+        zoomable: true,
+        openEffect: 'zoom',
+        closeEffect: 'fade',
+      });
+      lb.open();
+    });
+  }
+
+  // ── Inline rename ───────────────────────────────────────────────────────────
+  function startRename(folderNumber) {
+    const lbl = document.getElementById(`lbl-${folderNumber}`);
+    if (!lbl || lbl.dataset.editing) return;
+    lbl.dataset.editing = '1';
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'folder-label-input';
+    input.value = getFolderName(folderNumber);
+    lbl.replaceWith(input);
+    input.select();
+
+    function commit() {
+      const newName = input.value.trim();
+      saveFolderName(folderNumber, newName);
+      const span = document.createElement('span');
+      span.className = 'folder-label';
+      span.id = `lbl-${folderNumber}`;
+      span.title = 'Click to rename';
+      span.textContent = getFolderName(folderNumber);
+      span.addEventListener('click', () => startRename(folderNumber));
+      input.replaceWith(span);
+    }
+
+    input.addEventListener('blur', commit);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+      if (e.key === 'Escape') { input.value = getFolderName(folderNumber); input.blur(); }
+    });
   }
 
   // ── Image update ────────────────────────────────────────────────────────────
-  function updateImage(folderNumber, imagePath) {
+  function updateImage(folderNumber, imagePath, mtime, flash = true) {
     if (!knownFolders[folderNumber]) createCard(folderNumber);
 
     const img  = document.getElementById(`img-${folderNumber}`);
     const ph   = document.getElementById(`ph-${folderNumber}`);
     const ts   = document.getElementById(`ts-${folderNumber}`);
-    const fn   = document.getElementById(`fn-${folderNumber}`);
     const card = document.getElementById(`card-${folderNumber}`);
 
     // Cache-bust so the browser always fetches the freshest file
+    const wrap = document.getElementById(`wrap-${folderNumber}`);
     img.onload = () => {
       img.style.display = 'block';
       ph.style.display  = 'none';
+      wrap.classList.add('has-image');
     };
     img.src = `${imagePath}?t=${Date.now()}`;
 
-    ts.textContent = new Date().toLocaleTimeString();
-    fn.textContent = decodeURIComponent(imagePath.split('/').pop());
+    lastUpdateTime[folderNumber] = mtime || Date.now();
+    ts.textContent = timeAgo(lastUpdateTime[folderNumber]);
 
-    // Green flash to signal update
-    card.classList.remove('flash');
-    void card.offsetWidth;          // force reflow to re-trigger transition
-    card.classList.add('flash');
-    setTimeout(() => card.classList.remove('flash'), 1500);
+    // Green flash to signal update (live updates only)
+    if (flash) {
+      card.classList.remove('flash');
+      void card.offsetWidth;          // force reflow to re-trigger transition
+      card.classList.add('flash');
+      setTimeout(() => card.classList.remove('flash'), flashSeconds * 1000);
+    }
   }
 
-  // ── SSE ─────────────────────────────────────────────────────────────────────
-  let evtSource;
+  // ── Socket.IO ────────────────────────────────────────────────────────────────
+  const socket = io();
 
-  function connect() {
-    setStatus('connecting', 'Connecting…');
-    evtSource = new EventSource('/events');
+  socket.on('config', ({ flashSeconds: fs, alertOnly: ao }) => {
+    flashSeconds = fs;
+    alertOnly    = !!ao;
+  });;
 
-    evtSource.onopen = () => setStatus('connected', 'Live');
+  socket.on('connect',       () => setStatus('connected',    'Live'));
+  socket.on('disconnect',    () => setStatus('disconnected', 'Disconnected — reconnecting…'));
+  socket.on('connect_error', () => setStatus('disconnected', 'Connection error'));
 
-    evtSource.onmessage = (e) => {
-      const { folderNumber, imagePath } = JSON.parse(e.data);
-      updateImage(folderNumber, imagePath);
-    };
+  socket.on('init',  ({ folderNumber, imagePath, mtime }) => {
+    updateImage(folderNumber, imagePath, mtime, false);
+  });
 
-    evtSource.onerror = () => {
-      setStatus('disconnected', 'Disconnected — retrying…');
-      evtSource.close();
-      setTimeout(connect, 3000);
-    };
-  }
-
-  connect();
+  socket.on('image', ({ folderNumber, imagePath, mtime }) => {
+    if (alertOnly) {
+      const name = getFolderName(folderNumber);
+      const filename = decodeURIComponent(imagePath.split('/').pop());
+      alert(`[${name}] New screenshot: ${filename}`);
+      return;
+    }
+    updateImage(folderNumber, imagePath, mtime, true);
+  });
 </script>
+<script src="https://cdn.jsdelivr.net/npm/glightbox/dist/js/glightbox.min.js"></script>
 </body>
 </html>
