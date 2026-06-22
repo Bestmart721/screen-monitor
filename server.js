@@ -104,59 +104,67 @@ function broadcast(data) {
 
 // ── Initial scan ──────────────────────────────────────────────────────────────
 /**
- * For a single level-1 folder, find its latest image by always recursing into
- * the newest subdirectory (by mtime) at each level. This reads O(depth × width)
- * entries instead of every file, so it stays fast even with thousands of images.
+ * Fixed-depth scan matching the known structure:
+ *   SCREENSHOTS_DIR / folderNumber / session-guid / YYYY-MM-DD / image.jpg
+ *
+ * Per folder-number this does exactly 3 readdirSync calls:
+ *   1. list guid dirs  → stat each to pick the newest one
+ *   2. list date dirs  → sort by name desc (ISO dates are lexicographic)
+ *   3. list files in newest date dir → stat images to pick newest
+ * No recursion, no scanning of old files.
  */
-function findLatestImage(dir) {
-  let entries;
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return null; }
+function initialScan(dir) {
+  let level1;
+  try { level1 = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
 
-  let bestImage = null;
-  const subdirs = [];
+  for (const l1 of level1) {
+    if (l1.name.startsWith('.') || !l1.isDirectory()) continue;
+    const folderNumber = l1.name;
+    const l1dir = path.join(dir, folderNumber);
 
-  for (const entry of entries) {
-    if (entry.name.startsWith('.')) continue;
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
+    // Level 2: session-guid dirs — stat each, keep only the newest
+    let level2;
+    try { level2 = fs.readdirSync(l1dir, { withFileTypes: true }); } catch { continue; }
+    let newestGuid = null;
+    for (const l2 of level2) {
+      if (l2.name.startsWith('.') || !l2.isDirectory()) continue;
+      const full = path.join(l1dir, l2.name);
       let stat;
       try { stat = fs.statSync(full); } catch { continue; }
-      subdirs.push({ full, mtime: stat.mtimeMs });
-    } else if (isImageFile(full)) {
+      if (!newestGuid || stat.mtimeMs > newestGuid.mtime) {
+        newestGuid = { full, mtime: stat.mtimeMs };
+      }
+    }
+    if (!newestGuid) continue;
+
+    // Level 3: date dirs — sort by name desc (YYYY-MM-DD sorts lexicographically)
+    let level3;
+    try { level3 = fs.readdirSync(newestGuid.full, { withFileTypes: true }); } catch { continue; }
+    const newestDate = level3
+      .filter(e => !e.name.startsWith('.') && e.isDirectory())
+      .map(e => e.name)
+      .sort()
+      .at(-1);
+    if (!newestDate) continue;
+    const dateDir = path.join(newestGuid.full, newestDate);
+
+    // Level 4: pick newest image in that date dir
+    let files;
+    try { files = fs.readdirSync(dateDir, { withFileTypes: true }); } catch { continue; }
+    let bestImage = null;
+    for (const f of files) {
+      if (f.isDirectory() || f.name.startsWith('.')) continue;
+      const full = path.join(dateDir, f.name);
+      if (!isImageFile(full)) continue;
       let stat;
       try { stat = fs.statSync(full); } catch { continue; }
       if (!bestImage || stat.mtimeMs > bestImage.mtime) {
         bestImage = { full, mtime: stat.mtimeMs };
       }
     }
-  }
 
-  // Recurse into the 2 newest subdirectories only
-  subdirs.sort((a, b) => b.mtime - a.mtime);
-  for (const { full } of subdirs.slice(0, 2)) {
-    const candidate = findLatestImage(full);
-    if (candidate && (!bestImage || candidate.mtime > bestImage.mtime)) {
-      bestImage = candidate;
-    }
-  }
-
-  return bestImage;
-}
-
-/**
- * Reads only the level-1 subdirectory names from SCREENSHOTS_DIR, then calls
- * findLatestImage for each — no deep recursive scan over all historic files.
- */
-function initialScan(dir) {
-  let entries;
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-
-  for (const entry of entries) {
-    if (entry.name.startsWith('.') || !entry.isDirectory()) continue;
-    const folderNumber = entry.name;
-    const latest = findLatestImage(path.join(dir, folderNumber));
-    if (latest) {
-      latestImages.set(folderNumber, { url: toImageUrl(latest.full), mtime: latest.mtime });
+    if (bestImage) {
+      latestImages.set(folderNumber, { url: toImageUrl(bestImage.full), mtime: bestImage.mtime });
     }
   }
 }
