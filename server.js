@@ -21,6 +21,7 @@ const SCREENSHOTS_DIR = process.env.SCREENSHOTS_DIR
 
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']);
 const FLASH_SECONDS    = parseInt(process.env.FLASH_SECONDS || '5', 10);
+const DEBOUNCE_MS      = parseInt(process.env.DEBOUNCE_MS || '300', 10);
 const ALLOWED_IPS      = process.env.ALLOWED_IPS
   ? process.env.ALLOWED_IPS.split(',').map(ip => ip.trim()).filter(Boolean)
   : [];
@@ -38,6 +39,8 @@ function isAllowedIp(ip) {
 // ── State ─────────────────────────────────────────────────────────────────────
 // folderNumber (string) → { url: string, mtime: number }
 const latestImages = new Map();
+// folderNumber (string) → debounce timer handle
+const debounceTimers = new Map();
 
 // Socket.IO handles client tracking internally
 
@@ -138,8 +141,10 @@ const watcher = chokidar.watch(SCREENSHOTS_DIR, {
   ignored: /(^|[/\\])\../,      // skip hidden files/dirs
   persistent: true,
   ignoreInitial: true,           // initial state already populated by initialScan
-  ignorePermissionErrors: true,
-});
+  ignorePermissionErrors: true,  awaitWriteFinish: {
+    stabilityThreshold: DEBOUNCE_MS,   // ms file must be stable before firing
+    pollInterval: 100,
+  },});
 
 watcher.on('add', (filePath, stats) => {
   if (!isImageFile(filePath)) return;
@@ -150,10 +155,18 @@ watcher.on('add', (filePath, stats) => {
 
   // Only promote this file if it is at least as new as the current latest
   if (!current || mtime >= current.mtime) {
-    const url = toImageUrl(filePath);
-    latestImages.set(folderNumber, { url, mtime });
-    console.log(`[+] folder=${folderNumber}  ${path.basename(filePath)}`);
-    broadcast({ folderNumber, imagePath: url, mtime });
+    latestImages.set(folderNumber, { url: toImageUrl(filePath), mtime });
+
+    // Debounce broadcast per folder — coalesces bursts into one emit
+    clearTimeout(debounceTimers.get(folderNumber));
+    debounceTimers.set(folderNumber, setTimeout(() => {
+      debounceTimers.delete(folderNumber);
+      const latest = latestImages.get(folderNumber);
+      if (latest) {
+        console.log(`[+] folder=${folderNumber}  ${path.basename(latest.url)}`);
+        broadcast({ folderNumber, imagePath: latest.url, mtime: latest.mtime });
+      }
+    }, DEBOUNCE_MS));
   }
 });
 
